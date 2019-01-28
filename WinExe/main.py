@@ -15,6 +15,8 @@ from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 from kivy.lang import Builder
 
+from kivy.graphics import Color, Rectangle
+
 from threading import Thread
 from pydub import AudioSegment
 import os
@@ -98,14 +100,23 @@ class Converter(Thread):
 		self.to_ = to_
 		self.statecallback = statecallback
 
-		self.enabled = False
+		self.enabled = True
+		self.finished = False
 
 	def convert_file(self,src,dst,from_,to_):
 		print('converting {} to destination {} from format {} to format {}'.format(
 			src,dst,from_,to_
 		))
-		song = AudioSegment.from_file(src,from_)
-		song.export(os.path.join(DESTINATION_FOLDER,dst), format=to_)
+		self.statecallback(src,'reading')
+		if from_:
+			song = AudioSegment.from_file(src,from_)
+		else:
+			song = AudioSegment.from_file(src)
+		self.statecallback(src,'exporting')
+		if to_:
+			song.export(os.path.join(DESTINATION_FOLDER,dst), format=to_)
+		else:
+			song.export(os.path.join(DESTINATION_FOLDER,dst))
 
 	def run(self):
 		to_conv = [l for l in self.list if l['state'] == "pending"]
@@ -118,11 +129,26 @@ class Converter(Thread):
 			dst = dst[:-1*len(self.from_)]+self.to_
 			try:
 				self.convert_file(next_['file'],dst,self.from_,self.to_)
-			except:
-				self.statecallback(next_['file'],'error')
-			else:	
 				self.statecallback(next_['file'],'done')
+			except Exception as exc:
+				print(exc)
+				try:
+					self.convert_file(next_['file'],dst,self.from_,None)
+					self.statecallback(next_['file'],'done')
+				except Exception as exc:
+					print(exc)
+					try:
+						self.convert_file(next_['file'],dst,None,self.to_)
+						self.statecallback(next_['file'],'done')
+					except Exception as exc:
+						try:
+							self.convert_file(next_['file'],dst,None,None)
+							self.statecallback(next_['file'],'done')
+						except Exception as exc:
+							self.statecallback(next_['file'],'error')
+							print(exc)				
 			to_conv = [l for l in self.list if l['state'] == "pending"]
+		self.finished = True
 
 		
 
@@ -133,6 +159,7 @@ class FilesHolder(object):
 		super(FilesHolder, self).__init__()
 		self.trg_format = None
 		self.GrList = GrList
+		self.selected = []
 
 	def set_format(self,format_):
 		self.trg_format = format_
@@ -145,6 +172,18 @@ class FilesHolder(object):
 				else:
 					self.change_state(file['file'],"pending")
 
+
+	def set_selected(self,file):
+		file['selected'] = not file['selected']
+		if file['selected']:
+			with file['name_lab'].canvas:
+			    Color(0, 0, 1)
+			    Rectangle(pos=file['name_lab'].pos, size=file['name_lab'].size)
+		else:
+			with file['name_lab'].canvas:
+			    Color(1, 1, 1)
+			    Rectangle(pos=file['name_lab'].pos, size=file['name_lab'].size)
+
 	def append(self,file):
 		state = "pending"
 		format_ = file.split('.')[-1]
@@ -153,18 +192,22 @@ class FilesHolder(object):
 		elif format_.lower() != self.trg_format.lower():
 			state = 'ignored'
 
+		text = file if len(file) < 55 else '...'+file[-55:]
 		new_file = {
 			"file":file,
 			"format":format_,
 			"state":state,
-			"lab":Label(text=state,size_hint=(1,None),height=20,color=STATE_COLORS[state])
+			"name_lab":Label(text=text,size_hint=(1,None),height=20,color=(0,0,0,1)),
+			"lab":Label(text=state,size_hint=(1,None),height=20,color=STATE_COLORS[state]),
+			"selected":False
 		}
 		self.GrList.FlList.append(new_file)
-		text = new_file['file'] if len(new_file['file']) < 55 else '...'+new_file['file'][-55:]
-		textformat = new_file['format'] if len(new_file['format']) < 7 else '?'
-		self.GrList.add_widget(Label(text=text,size_hint=(1,None),height=20,color=(0,0,0,1)))
+		textformat = new_file['format'] if len(new_file['format']) < 7 else '?' 
+		new_file['name_lab'].bind(on_press=lambda x:self.set_selected(new_file))
+		self.GrList.add_widget(new_file['name_lab'])
 		self.GrList.add_widget(Label(text=new_file['format'],size_hint=(1,None),height=20,color=(0,0,0,1)))
 		self.GrList.add_widget(new_file['lab'])
+
 
 	def change_state(self,file,new_state):
 		try:
@@ -237,21 +280,27 @@ class ConverterApp(App):
 		if len(errors):
 			self.show_errors(errors)
 			return None
-
+		start = False
 		if self.converter is None:
 			self.converter = Converter(
 				self.AudioFls_toconvert.GrList.FlList,
 				self.input_format,self.output_format,
-				self.AudioFls_toconvert.change_state
+				self.AudioFls_toconvert.change_state,
+				daemon=True
 			)
-		if self.converter.enabled == False:
-			if self.started == True:
-				self.converter = Converter(
-					self.AudioFls_toconvert.GrList.FlList,
-					self.input_format,self.output_format,
-					self.AudioFls_toconvert.change_state
-				)
-				self.started = True
+			start = True
+
+		if self.converter.finished == True or self.started == False:
+			self.converter = Converter(
+				self.AudioFls_toconvert.GrList.FlList,
+				self.input_format,self.output_format,
+				self.AudioFls_toconvert.change_state,
+				daemon=True
+			)
+			start = True
+		
+		if start:
+			self.started = True
 			self.converter.enabled = True
 			self.converter.start()
 
@@ -377,6 +426,7 @@ class ConverterApp(App):
 				len([f for f in filelist if f['state'] == 'pending']),
 				len([f for f in filelist if f['state'] == 'done']),
 			)
+		self.changeHeader = changeHeader
 		sub_gl_1_1.bind(FlList=changeHeader)
 		gl.add_widget(header)
 		gl.add_widget(sub_gl_1)
